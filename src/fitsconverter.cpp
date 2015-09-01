@@ -227,16 +227,14 @@ bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& image
 bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out) {
 
     int32_t nTimesteps = imageMetaData.size();
-    int32_t imageWidth = common.croppedSize.x;
-    int32_t imageHeight = common.croppedSize.y;
+    int32_t nBricksPerDim = common.croppedSize.x / _brickSize.x;
     int32_t brickWidth = _brickSize.x;
     int32_t brickHeight = _brickSize.y;
     int32_t paddingX = _padding.x;
     int32_t paddingY = _padding.y;
 
     out.write(reinterpret_cast<char*>(&nTimesteps), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&imageWidth), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&imageHeight), sizeof(int32_t));
+    out.write(reinterpret_cast<char*>(&nBricksPerDim), sizeof(int32_t));
     out.write(reinterpret_cast<char*>(&brickWidth), sizeof(int32_t));
     out.write(reinterpret_cast<char*>(&brickHeight), sizeof(int32_t));
     out.write(reinterpret_cast<char*>(&paddingX), sizeof(int32_t));
