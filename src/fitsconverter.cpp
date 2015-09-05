@@ -24,8 +24,8 @@ namespace {
     glm::ivec2 zIndexToCartesian(uint32_t in) {
         glm::ivec2 out(0);
         for (int i = 0; i < 16; i++) {
-            out.x += (i+1) * (in & (i << (i*2)));
-            out.y += (i+1) * (in & (i << (i*2 + 1)));
+            out.x |= (in >> (i*2) & 1) << i;
+            out.y |= (in >> (i*2 + 1) & 1) << i;
         }
         return out;
     }
@@ -226,19 +226,19 @@ bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& image
 
 bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out) {
 
-    int32_t nTimesteps = imageMetaData.size();
-    int32_t nBricksPerDim = common.croppedSize.x / _brickSize.x;
-    int32_t brickWidth = _brickSize.x;
-    int32_t brickHeight = _brickSize.y;
-    int32_t paddingX = _padding.x;
-    int32_t paddingY = _padding.y;
+    uint32_t nTimesteps = imageMetaData.size();
+    uint32_t nBricksPerDim = common.croppedSize.x / _brickSize.x;
+    uint32_t brickWidth = _brickSize.x;
+    uint32_t brickHeight = _brickSize.y;
+    uint32_t paddingX = _padding.x;
+    uint32_t paddingY = _padding.y;
 
-    out.write(reinterpret_cast<char*>(&nTimesteps), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&nBricksPerDim), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&brickWidth), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&brickHeight), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&paddingX), sizeof(int32_t));
-    out.write(reinterpret_cast<char*>(&paddingY), sizeof(int32_t));
+    out.write(reinterpret_cast<char*>(&nTimesteps), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&nBricksPerDim), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&brickWidth), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&brickHeight), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&paddingX), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&paddingY), sizeof(uint32_t));
 
     // todo: output some meta data for each image.
 }
@@ -256,14 +256,19 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
     image.readAllKeys();
     image.read(contents);
 
+    /*{
+    double exptime;
+    image.readKey("EXPTIME", exptime);
+    std::cout << exptime << std::endl;
+    }*/
+
     unsigned int bricksPerDim = croppedSize.x / _brickSize.x;
     unsigned int nLevels = log2(bricksPerDim) + 1;
 
-
-    std::vector<std::vector<int16_t> > levels(nLevels);
+    std::vector<std::vector<double> > levels(nLevels);
 
     // Read from contents and crop data if necessary.
-    std::vector<int16_t>& leafLevel = levels[0];
+    std::vector<double>& leafLevel = levels[0];
     leafLevel.resize(croppedSize.x * croppedSize.y);
     for (unsigned int y = 0; y < croppedSize.y; y++) {
         for (unsigned int x = 0; x < croppedSize.x; x++) {
@@ -274,8 +279,8 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
 
     // Downsample data for all levels
     for (unsigned int levelIndex = 1; levelIndex < nLevels; levelIndex++) {
-        std::vector<int16_t>& level = levels[levelIndex];
-        std::vector<int16_t>& childLevel = levels[levelIndex - 1];
+        std::vector<double>& level = levels[levelIndex];
+        std::vector<double>& childLevel = levels[levelIndex - 1];
         glm::ivec2 levelSize = croppedSize / static_cast<int>(pow(2, levelIndex));
         glm::ivec2 childLevelSize = croppedSize / static_cast<int>(pow(2, levelIndex - 1));
 
@@ -300,7 +305,7 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
 
     std::vector<int16_t> brickData(nBricksInQuadTree * nBrickVals);
     for (int levelIndex = nLevels - 1; levelIndex >= 0; levelIndex--) {
-        std::vector<int16_t>& level = levels[levelIndex];
+        std::vector<double>& level = levels[levelIndex];
         unsigned int bricksInLevel = pow(4, nLevels - levelIndex - 1);
 
         glm::ivec2 levelSize = croppedSize / static_cast<int>(pow(2, levelIndex));
@@ -308,6 +313,7 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
 
         for (int zIndex = 0; zIndex < bricksInLevel; zIndex++) {
             glm::ivec2 brickCoord = zIndexToCartesian(zIndex);
+
             glm::ivec2 brickMin = brickCoord * _brickSize;
             glm::ivec2 brickMax = brickCoord * (_brickSize + glm::ivec2(1));
 
@@ -318,7 +324,7 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
                     unsigned int brickOffset = (levelOffset + zIndex) * nBrickVals;
                     unsigned int voxelOffset = cartesianToLinear(glm::ivec2(brickX, brickY), paddedBrickSize);
                     unsigned int inputOffset = clampCartesianToLinear(glm::ivec2(globalX, globalY), levelSize);
-                    brickData[brickOffset + voxelOffset] = level[inputOffset];
+                    brickData[brickOffset + voxelOffset] = std::round(level[inputOffset]);
                 }
             }
         }
