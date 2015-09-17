@@ -18,20 +18,33 @@ class FitsConverter {
     bool convertFolder();
 
     struct CommonMetaData {
+        unsigned int nTimesteps;
         glm::ivec2 originalSize;
         glm::ivec2 croppedSize;
+        bool hasMinMaxEnergy = false;
+        bool hasMinMaxExpTime = false;
+        double minFlux;
+        double maxFlux;
+        int16_t maxEnergy;
+        int16_t minEnergy;
+        double minExpTime;
+        double maxExpTime;
+        unsigned int startTime;
+        unsigned int endTime;
     };
 
     struct ImageMetaData {
         std::string filename;
         unsigned int timestamp;
+        double expTime;
     };
  private:
     bool validateInput();
-    bool convertFile(std::string filename, const CommonMetaData& common, std::fstream& file);
+    bool convertFile(std::string filename, ImageMetaData& metaData, CommonMetaData& common, std::fstream& file);
     bool readCommonMetaData(std::string filename, CommonMetaData& metaData);
-    bool readImageMetaData(std::string filename, ImageMetaData& imageMetaData, const CommonMetaData& common);
-    bool createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out);
+    bool readImageMetaData(std::string filename, ImageMetaData& imageMetaData, CommonMetaData& common);
+    bool createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out, bool log = true);
+    bool createHeaderPlaceholder(const CommonMetaData& common, std::fstream& out);
 
     std::string _inFolderName;
     std::string _outFileName;

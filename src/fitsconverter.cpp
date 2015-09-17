@@ -99,19 +99,23 @@ bool FitsConverter::convertFolder() {
         imageMetaData.push_back(metaData);
     }
 
+    common.nTimesteps = imageMetaData.size();
     std::fstream out(_outFileName, std::fstream::out | std::fstream::binary);
-    createHeader(common, imageMetaData, out);
+    createHeaderPlaceholder(common, out);
+
     int i = 0;
     for (const fs::path& filename : filenames) {
-        if (convertFile(filename.string(), common, out)) {
+        std::cout << "\rConverting timestep " << (i+1) << "/" << nTimesteps << " from " << filename << "..." << std::flush;
+        if (convertFile(filename.string(), imageMetaData[i], common, out)) {
             i++;
-            std::cout << "Converted timestep " << i << "/" << nTimesteps << " from " << filename << std::endl;
         } else {
             std::cerr << "Failed to convert " << filename << std::endl;
             out.close();
             return false;
         }
     }
+
+    std::cout << "\r" << std::endl;
 
     if (nTimesteps == 1) {
         std::cout << "Successfully converted 1 timestep from \""
@@ -120,6 +124,7 @@ bool FitsConverter::convertFolder() {
         std::cout << "Successfully converted " << nTimesteps << " timesteps from "
                   << _inFolderName << "\" to \"" << _outFileName << "\"" << std::endl;
     }
+    createHeader(common, imageMetaData, out);
     out.close();
 }
 
@@ -199,7 +204,7 @@ bool FitsConverter::readCommonMetaData(std::string filename, CommonMetaData& met
 }
 
 
-bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& imageMetaData, const CommonMetaData& common) {
+bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& imageMetaData, CommonMetaData& common) {
     CCfits::FITS file(filename, CCfits::Read, true);
     CCfits::PHDU& image = file.pHDU();
     int nAxes = image.axes();
@@ -220,18 +225,43 @@ bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& image
 
     imageMetaData.filename = filename;
     imageMetaData.timestamp = 0; // todo: actually extract this from file.
+
+    double expTime;
+    image.readKey("EXPTIME", expTime);
+    imageMetaData.expTime = expTime;
+
+    if (common.hasMinMaxExpTime) {
+        common.minExpTime = std::min(common.minExpTime, expTime);
+        common.maxExpTime = std::max(common.maxExpTime, expTime);
+    } else {
+        common.minExpTime = common.maxExpTime = expTime;
+        common.hasMinMaxExpTime = true;
+    }
+
     return true;
 }
 
+bool FitsConverter::createHeaderPlaceholder(const CommonMetaData& common, std::fstream& out) {
+    int size = 60 + common.nTimesteps*sizeof(double);
+    char* zeros = new char[size];
+    out.write(zeros, size);
+}
 
-bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out) {
 
-    uint32_t nTimesteps = imageMetaData.size();
+bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out, bool log) {
+    out.seekg(0);
+    uint32_t nTimesteps = common.nTimesteps;
     uint32_t nBricksPerDim = common.croppedSize.x / _brickSize.x;
     uint32_t brickWidth = _brickSize.x;
     uint32_t brickHeight = _brickSize.y;
     uint32_t paddingX = _padding.x;
     uint32_t paddingY = _padding.y;
+    int16_t minEnergy = common.minEnergy;
+    int16_t maxEnergy = common.maxEnergy;
+    double minFlux = common.minFlux;
+    double maxFlux = common.maxFlux;
+    double minExpTime = common.minExpTime;
+    double maxExpTime = common.maxExpTime;
 
     out.write(reinterpret_cast<char*>(&nTimesteps), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&nBricksPerDim), sizeof(uint32_t));
@@ -239,12 +269,38 @@ bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector
     out.write(reinterpret_cast<char*>(&brickHeight), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&paddingX), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&paddingY), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&minEnergy), sizeof(int16_t));
+    out.write(reinterpret_cast<char*>(&maxEnergy), sizeof(int16_t));
+    out.write(reinterpret_cast<char*>(&minFlux), sizeof(double));
+    out.write(reinterpret_cast<char*>(&maxFlux), sizeof(double));
+    out.write(reinterpret_cast<char*>(&minExpTime), sizeof(double));
+    out.write(reinterpret_cast<char*>(&maxExpTime), sizeof(double));
 
-    // todo: output some meta data for each image.
+    int col1 = 30;
+    int col2 = 0;
+    if (log) {
+        std::cout << std::setw(col1) << "Timesteps: " << std::setw(col2) << nTimesteps << std::endl;
+        std::cout << std::setw(col1) << "Bricks per dimension: " << std::setw(col2) << nBricksPerDim << std::endl;
+        std::cout << std::setw(col1) << "Brick dimensions: " << std::setw(col2) << brickWidth << "x" << brickHeight << std::endl;
+        std::cout << std::setw(col1) << "Padding: " << std::setw(col2) << paddingX << "x" << paddingY << " (on each side)"<< std::endl;
+        std::cout << std::setw(col1) << "Min energy: " << std::setw(col2) << minEnergy << std::endl;
+        std::cout << std::setw(col1) << "Max energy: " << std::setw(col2) << maxEnergy << std::endl;
+        std::cout << std::setw(col1) << "Min flux: " << std::setw(col2) << minFlux << std::endl;
+        std::cout << std::setw(col1) << "Max flux: " << std::setw(col2) << maxFlux << std::endl;
+        std::cout << std::setw(col1) << "Min exposure time: " << std::setw(col2) << minExpTime << std::endl;
+        std::cout << std::setw(col1) << "Max exposure time: " << std::setw(col2) << maxExpTime << std::endl;
+    }
+
+
+    for (int i = 0; i < imageMetaData.size(); i++) {
+        const ImageMetaData& data = imageMetaData[i];
+        double expTime = data.expTime;
+        out.write(reinterpret_cast<char*>(&expTime), sizeof(double));
+    }
 }
 
 
-bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& common, std::fstream& out) {
+bool FitsConverter::convertFile(std::string inFilename, ImageMetaData& metaData, CommonMetaData& common, std::fstream& out) {
 
     CCfits::FITS file(inFilename, CCfits::Read, true);
     CCfits::PHDU& image = file.pHDU();
@@ -256,12 +312,6 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
     image.readAllKeys();
     image.read(contents);
 
-    /*{
-    double exptime;
-    image.readKey("EXPTIME", exptime);
-    std::cout << exptime << std::endl;
-    }*/
-
     unsigned int bricksPerDim = croppedSize.x / _brickSize.x;
     unsigned int nLevels = log2(bricksPerDim) + 1;
 
@@ -272,10 +322,27 @@ bool FitsConverter::convertFile(std::string inFilename, const CommonMetaData& co
     leafLevel.resize(croppedSize.x * croppedSize.y);
     for (unsigned int y = 0; y < croppedSize.y; y++) {
         for (unsigned int x = 0; x < croppedSize.x; x++) {
-            leafLevel[cartesianToLinear(glm::ivec2(x, y), croppedSize)] =
-                contents[cartesianToLinear(glm::ivec2(x, y) + _inputRectangleTopLeft, originalSize)];
+
+            int16_t low = 0;
+            int16_t energy = glm::max(contents[cartesianToLinear(glm::ivec2(x, y) + _inputRectangleTopLeft, originalSize)], low);
+
+            double flux = static_cast<double>(energy)/static_cast<double>(metaData.expTime);
+            if (common.hasMinMaxEnergy) {
+                common.minEnergy = std::min(common.minEnergy, energy);
+                common.maxEnergy = std::max(common.maxEnergy, energy);
+                common.minFlux = std::min(common.minFlux, flux);
+                common.maxFlux = std::max(common.maxFlux, flux);
+            } else {
+                common.minEnergy = common.maxEnergy = energy;
+                common.minFlux = common.maxFlux = flux;
+                common.hasMinMaxEnergy = true;
+            }
+            leafLevel[cartesianToLinear(glm::ivec2(x, y), croppedSize)] = energy;
         }
     }
+
+
+
 
     // Downsample data for all levels
     for (unsigned int levelIndex = 1; levelIndex < nLevels; levelIndex++) {
