@@ -1,16 +1,37 @@
 #include <CCfits>
 #include <iostream>
 #include <fitsconverter.h>
+#include <lz4compressor.h>
 
 int main() {
-    FitsConverter fc;
-    fc.setInFolder("input");
-    fc.setOutFile("out.data");
 
-    fc.setBrickSize(glm::ivec2(510, 510));
-    fc.setPadding(glm::ivec2(1, 1));
-    fc.setInputRectangle(glm::ivec2(8, 8), glm::ivec2(4080, 4080));
-    fc.convertFolder();
+    // Create lz4 compressed output
+    {
+        FitsConverter fc;
+        fc.setInFolder("input/");
+        fc.setOutFile("two_compressed.data");
 
-    return 0;
+        Compressor* compressor = new Lz4Compressor();
+
+        fc.setCompressor(compressor);
+        fc.setBrickSize(glm::ivec2(64, 64));
+        fc.setPadding(glm::ivec2(1, 1));
+        fc.setInputRectangle(glm::ivec2(0, 0), glm::ivec2(4096, 4096));
+        fc.convertFolder();
+        delete compressor;
+    }
+
+    // Create uncompressed output
+    {
+        FitsConverter fc;
+        fc.setInFolder("input/");
+        fc.setOutFile("two_raw.data");
+
+        fc.setCompressor(nullptr);
+        fc.setBrickSize(glm::ivec2(64, 64));
+        fc.setPadding(glm::ivec2(1, 1));
+        fc.setInputRectangle(glm::ivec2(0, 0), glm::ivec2(4096, 4096));
+        fc.convertFolder();
+    }
+
 }

@@ -1,0 +1,6 @@
+[submodule "ext/ghoul"]
+	path = ext/ghoul
+	url = git@github.com:OpenSpace/Ghoul.git
+[submodule "ext/basicj2k"]
+	path = ext/basicj2k
+	url = git@github.com:emiax/basicj2k.git

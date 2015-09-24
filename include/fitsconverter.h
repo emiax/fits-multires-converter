@@ -7,6 +7,8 @@
 
 namespace fs = boost::filesystem;
 
+class Compressor;
+
 class FitsConverter {
  public:
     FitsConverter();
@@ -15,14 +17,15 @@ class FitsConverter {
     void setBrickSize(const glm::ivec2& brickSize);
     void setPadding(const glm::ivec2& padding);
     void setInputRectangle(const glm::ivec2& topLeft, const glm::ivec2& size);
+    void setCompressor(Compressor* compressor);
     bool convertFolder();
 
     struct CommonMetaData {
         unsigned int nTimesteps;
+        unsigned int nBricks;
+        unsigned int compressionType;
         glm::ivec2 originalSize;
         glm::ivec2 croppedSize;
-        bool hasMinMaxEnergy = false;
-        bool hasMinMaxExpTime = false;
         double minFlux;
         double maxFlux;
         int16_t maxEnergy;
@@ -31,6 +34,10 @@ class FitsConverter {
         double maxExpTime;
         unsigned int startTime;
         unsigned int endTime;
+
+        bool hasMinMaxEnergy = false;
+        bool hasMinMaxExpTime = false;
+        int currentBrickIndex = 0;
     };
 
     struct ImageMetaData {
@@ -38,12 +45,17 @@ class FitsConverter {
         unsigned int timestamp;
         double expTime;
     };
+
+    struct BrickMetaData {
+        unsigned int dataPosition;
+    };
+
  private:
     bool validateInput();
-    bool convertFile(std::string filename, ImageMetaData& metaData, CommonMetaData& common, std::fstream& file);
+    bool convertFile(std::string filename, CommonMetaData& common, ImageMetaData& metaData, std::vector<BrickMetaData>& brickMetaData, std::fstream& file);
     bool readCommonMetaData(std::string filename, CommonMetaData& metaData);
     bool readImageMetaData(std::string filename, ImageMetaData& imageMetaData, CommonMetaData& common);
-    bool createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out, bool log = true);
+    bool createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, const std::vector<BrickMetaData>& brickMetaData, std::fstream& out, bool log = true);
     bool createHeaderPlaceholder(const CommonMetaData& common, std::fstream& out);
 
     std::string _inFolderName;
@@ -52,7 +64,10 @@ class FitsConverter {
     glm::ivec2 _padding;
     glm::ivec2 _inputRectangleTopLeft;
     glm::ivec2 _inputRectangleSize;
+    Compressor *_compressor;
 
+    int16_t* _prevImage = nullptr;
+    double _prevExpTime = 0;
 };
 
 

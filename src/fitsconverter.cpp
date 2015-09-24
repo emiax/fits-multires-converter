@@ -2,6 +2,13 @@
 #include <set>
 #include <iostream>
 #include <CCfits>
+#include <lz4/lz4.h>
+#include <cassert>
+#include <sstream>
+#include <string>
+#include <stdint.h>
+#include <vector>
+#include <compressor.h>
 
 namespace {
     int cartesianToLinear(glm::ivec2 in, glm::ivec2 size) {
@@ -37,7 +44,8 @@ FitsConverter::FitsConverter()
     , _brickSize(0)
     , _padding(0)
     , _inputRectangleTopLeft(0)
-    , _inputRectangleSize(-1) {}
+    , _inputRectangleSize(-1)
+    , _compressor(nullptr) {}
 
 void FitsConverter::setInFolder(const std::string& inFolder) {
     _inFolderName = inFolder;
@@ -59,6 +67,11 @@ void FitsConverter::setInputRectangle(const glm::ivec2& topLeft, const glm::ivec
     _inputRectangleTopLeft = topLeft;
     _inputRectangleSize = size;
 }
+
+void FitsConverter::setCompressor(Compressor* compressor) {
+    _compressor = compressor;
+}
+
 bool FitsConverter::convertFolder() {
     if (!validateInput()) {
         return false;
@@ -82,31 +95,45 @@ bool FitsConverter::convertFolder() {
     }
 
     CommonMetaData common;
-    std::vector<ImageMetaData> imageMetaData;
-    imageMetaData.reserve(nTimesteps);
-
     if (!readCommonMetaData(filenames.begin()->string(), common)) {
         std::cerr << "Could not load common meta data from " << *filenames.begin() << std::endl;
         return false;
     }
 
+    glm::ivec2 croppedSize = common.croppedSize;
+    unsigned int bricksPerDim = croppedSize.x / _brickSize.x;
+    unsigned int nLevels = log2(bricksPerDim) + 1;
+    unsigned int nBricksInQuadTree = (pow(4, nLevels) - 1) / 3;
+
+    common.compressionType = _compressor ? static_cast<unsigned int>(_compressor->compressionType()) : 0;
+    common.nTimesteps = nTimesteps;
+    common.nBricks = common.nTimesteps * nBricksInQuadTree;
+
+    std::vector<ImageMetaData> imageMetaData;
+    std::vector<BrickMetaData> brickMetaData;
+
+    imageMetaData.resize(common.nTimesteps);
+    brickMetaData.resize(common.nBricks);
+
+    int i = 0;
     for (const fs::path& filename : filenames) {
         ImageMetaData metaData;
         if (!readImageMetaData(filename.string(), metaData, common)) {
             std::cerr << "Failed to load meta data from " << filename << std::endl;
             return false;
         }
-        imageMetaData.push_back(metaData);
+        imageMetaData[i] = metaData;
+        i++;
     }
 
-    common.nTimesteps = imageMetaData.size();
+
     std::fstream out(_outFileName, std::fstream::out | std::fstream::binary);
     createHeaderPlaceholder(common, out);
 
-    int i = 0;
+    i = 0;
     for (const fs::path& filename : filenames) {
         std::cout << "\rConverting timestep " << (i+1) << "/" << nTimesteps << " from " << filename << "..." << std::flush;
-        if (convertFile(filename.string(), imageMetaData[i], common, out)) {
+        if (convertFile(filename.string(), common, imageMetaData[i], brickMetaData, out)) {
             i++;
         } else {
             std::cerr << "Failed to convert " << filename << std::endl;
@@ -124,8 +151,9 @@ bool FitsConverter::convertFolder() {
         std::cout << "Successfully converted " << nTimesteps << " timesteps from "
                   << _inFolderName << "\" to \"" << _outFileName << "\"" << std::endl;
     }
-    createHeader(common, imageMetaData, out);
+    createHeader(common, imageMetaData, brickMetaData, out);
     out.close();
+    return true;
 }
 
 
@@ -200,6 +228,7 @@ bool FitsConverter::readCommonMetaData(std::string filename, CommonMetaData& met
     std::cout << "Padded brick size: (" << paddedBrickSize.x << ", " << paddedBrickSize.y << ")" << std::endl;
 
 
+
     return true;
 }
 
@@ -242,15 +271,18 @@ bool FitsConverter::readImageMetaData(std::string filename, ImageMetaData& image
 }
 
 bool FitsConverter::createHeaderPlaceholder(const CommonMetaData& common, std::fstream& out) {
-    int size = 60 + common.nTimesteps*sizeof(double);
+    int size = 68 + common.nTimesteps*sizeof(double) + common.nBricks*sizeof(unsigned int);
     char* zeros = new char[size];
     out.write(zeros, size);
+    return true;
 }
 
 
-bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, std::fstream& out, bool log) {
+bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector<ImageMetaData>& imageMetaData, const std::vector<BrickMetaData>& brickMetaData, std::fstream& out, bool log) {
     out.seekg(0);
     uint32_t nTimesteps = common.nTimesteps;
+    uint32_t nBricks = common.nBricks;
+    uint32_t compressionType = common.compressionType;
     uint32_t nBricksPerDim = common.croppedSize.x / _brickSize.x;
     uint32_t brickWidth = _brickSize.x;
     uint32_t brickHeight = _brickSize.y;
@@ -264,6 +296,8 @@ bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector
     double maxExpTime = common.maxExpTime;
 
     out.write(reinterpret_cast<char*>(&nTimesteps), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&nBricks), sizeof(uint32_t));
+    out.write(reinterpret_cast<char*>(&compressionType), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&nBricksPerDim), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&brickWidth), sizeof(uint32_t));
     out.write(reinterpret_cast<char*>(&brickHeight), sizeof(uint32_t));
@@ -291,17 +325,24 @@ bool FitsConverter::createHeader(const CommonMetaData& common, const std::vector
         std::cout << std::setw(col1) << "Max exposure time: " << std::setw(col2) << maxExpTime << std::endl;
     }
 
-
-    for (int i = 0; i < imageMetaData.size(); i++) {
+    for (unsigned int i = 0; i < imageMetaData.size(); i++) {
         const ImageMetaData& data = imageMetaData[i];
         double expTime = data.expTime;
         out.write(reinterpret_cast<char*>(&expTime), sizeof(double));
     }
+
+    for (unsigned int i = 0; i < brickMetaData.size(); i++) {
+        const BrickMetaData& data = brickMetaData[i];
+        unsigned int dataPosition = data.dataPosition;
+        out.write(reinterpret_cast<char*>(&dataPosition), sizeof(unsigned int));
+    }
+
+
+    return true;
 }
 
 
-bool FitsConverter::convertFile(std::string inFilename, ImageMetaData& metaData, CommonMetaData& common, std::fstream& out) {
-
+bool FitsConverter::convertFile(std::string inFilename, CommonMetaData& common, ImageMetaData& metaData, std::vector<BrickMetaData>& brickMetaData, std::fstream& out) {
     CCfits::FITS file(inFilename, CCfits::Read, true);
     CCfits::PHDU& image = file.pHDU();
 
@@ -320,8 +361,8 @@ bool FitsConverter::convertFile(std::string inFilename, ImageMetaData& metaData,
     // Read from contents and crop data if necessary.
     std::vector<double>& leafLevel = levels[0];
     leafLevel.resize(croppedSize.x * croppedSize.y);
-    for (unsigned int y = 0; y < croppedSize.y; y++) {
-        for (unsigned int x = 0; x < croppedSize.x; x++) {
+    for (int y = 0; y < croppedSize.y; y++) {
+        for (int x = 0; x < croppedSize.x; x++) {
 
             int16_t low = 0;
             int16_t energy = glm::max(contents[cartesianToLinear(glm::ivec2(x, y) + _inputRectangleTopLeft, originalSize)], low);
@@ -352,8 +393,8 @@ bool FitsConverter::convertFile(std::string inFilename, ImageMetaData& metaData,
         glm::ivec2 childLevelSize = croppedSize / static_cast<int>(pow(2, levelIndex - 1));
 
         level.resize(levelSize.x * levelSize.y);
-        for (unsigned int y = 0; y < levelSize.y; y++) {
-            for (unsigned int x = 0; x < levelSize.x; x++) {
+        for (int y = 0; y < levelSize.y; y++) {
+            for (int x = 0; x < levelSize.x; x++) {
                 level[cartesianToLinear(glm::ivec2(x, y), levelSize)] =
                     (childLevel[cartesianToLinear(glm::ivec2(x*2, y*2), childLevelSize)] +
                      childLevel[cartesianToLinear(glm::ivec2(x*2 + 1, y*2), childLevelSize)] +
@@ -366,38 +407,49 @@ bool FitsConverter::convertFile(std::string inFilename, ImageMetaData& metaData,
     // Write quad tree top-down, in z-order.
     glm::ivec2 padding = _padding;
     glm::ivec2 paddedBrickSize = _brickSize + 2*padding;
-    unsigned int nBricksInQuadTree = (pow(4, nLevels) - 1) / 3;
 
     unsigned int nBrickVals = paddedBrickSize.x * paddedBrickSize.y;
 
-    std::vector<int16_t> brickData(nBricksInQuadTree * nBrickVals);
+    std::vector<int16_t> brickData(nBrickVals);
+
     for (int levelIndex = nLevels - 1; levelIndex >= 0; levelIndex--) {
         std::vector<double>& level = levels[levelIndex];
         unsigned int bricksInLevel = pow(4, nLevels - levelIndex - 1);
 
         glm::ivec2 levelSize = croppedSize / static_cast<int>(pow(2, levelIndex));
-        unsigned int levelOffset = (pow(4, nLevels - levelIndex - 1) - 1) / 3;
-
-        for (int zIndex = 0; zIndex < bricksInLevel; zIndex++) {
+        for (unsigned int zIndex = 0; zIndex < bricksInLevel; zIndex++) {
             glm::ivec2 brickCoord = zIndexToCartesian(zIndex);
 
             glm::ivec2 brickMin = brickCoord * _brickSize;
-            glm::ivec2 brickMax = brickCoord * (_brickSize + glm::ivec2(1));
 
             for (int brickY = 0; brickY < paddedBrickSize.y; brickY++) {
                 for (int brickX = 0; brickX < paddedBrickSize.x; brickX++) {
                     int globalY = brickMin.y - padding.y + brickY;
                     int globalX = brickMin.x - padding.x + brickX;
-                    unsigned int brickOffset = (levelOffset + zIndex) * nBrickVals;
-                    unsigned int voxelOffset = cartesianToLinear(glm::ivec2(brickX, brickY), paddedBrickSize);
+                    unsigned int pixelOffset = cartesianToLinear(glm::ivec2(brickX, brickY), paddedBrickSize);
                     unsigned int inputOffset = clampCartesianToLinear(glm::ivec2(globalX, globalY), levelSize);
-                    brickData[brickOffset + voxelOffset] = std::round(level[inputOffset]);
+                    brickData[pixelOffset] = glm::clamp(static_cast<int>(std::round(level[inputOffset])), 0, UINT16_MAX);
                 }
             }
+
+            char* output = nullptr;
+            size_t outputSize = 0;
+            if (_compressor) {
+                // _compressor.compress allocates a vector of the required size
+                output = _compressor->compress(brickData.data(), paddedBrickSize, outputSize);
+            } else {
+                outputSize = nBrickVals * sizeof(int16_t);
+                output = new char[outputSize];
+                memcpy(output, reinterpret_cast<char*>(brickData.data()), outputSize);
+            }
+
+            brickMetaData[common.currentBrickIndex].dataPosition = out.tellg();
+            out.write(output, outputSize);
+
+            delete[] output;
+            common.currentBrickIndex++;
         }
     }
-
-    out.write(reinterpret_cast<char*>(&brickData[0]), sizeof(int16_t) * brickData.size());
     return true;
 }
 
